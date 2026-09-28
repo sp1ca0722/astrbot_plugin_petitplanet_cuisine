@@ -1,24 +1,149 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+import asyncio
+import os
+import re
+import unicodedata
+from difflib import SequenceMatcher
+
+import pandas as pd
+
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
+from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 
-@register("helloworld", "YourName", "一个简单的 Hello World 插件", "1.0.0")
+CUTOFF = 0.3
+# 删掉品质
+NAME_TAIL = re.compile(r"\s*\([^()]*\)\s*$")
+# 从消息里剥掉 "/cuisine"、"/菜谱" 这类指令前缀，兼容带不带斜杠、带不带空格
+# 用后瞻 (?![A-Za-z0-9_]) 代替 \b：\b 对中文不生效（中文算 word 字符），会导致 “/菜谱和煦花果茶” 剥不掉
+CMD_PREFIX = re.compile(r"^\s*/?\s*(?:cuisine|菜谱)(?![A-Za-z0-9_])[\s:：]*", re.IGNORECASE)
+# 数据表跟 main.py 放一起，避免受 AstrBot 启动目录影响
+EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuisine.xlsx")
+
+
+def base_name(text: str) -> str:
+    """全角转半角 → 去首尾空白 → 剥掉尾部的括号标注。"""
+    s = unicodedata.normalize("NFKC", str(text)).strip()
+    return NAME_TAIL.sub("", s).strip() or s
+
+
+@register("astrbot_plugin_petitplanet_cuisine", "leoli", "星布谷地菜谱查询", "1.0.0")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
+        self._rows = []
+        self._names = []
+        self._base_names = []
 
     async def initialize(self):
-        """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
+        """插件实例化后自动调用：把菜谱表读进内存，之后每次查询不再碰磁盘。"""
+        try:
+            df = await asyncio.to_thread(pd.read_excel, EXCEL_PATH, header=None)
+        except Exception as e:  # 文件缺失 / 没装 openpyxl
+            logger.error(f"读取 cuisine.xlsx 失败（{EXCEL_PATH}）：{e}")
+            return
 
-    # 注册指令的装饰器。指令名为 helloworld。注册成功后，发送 `/helloworld` 就会触发这个指令，并回复 `你好, {user_name}!`
-    @filter.command("helloworld")
-    async def helloworld(self, event: AstrMessageEvent):
-        """这是一个 hello world 指令""" # 这是 handler 的描述，将会被解析方便用户了解插件内容。建议填写。
-        user_name = event.get_sender_name()
-        message_str = event.message_str # 用户发的纯文本消息字符串
-        message_chain = event.get_messages() # 用户所发的消息的消息链 # from astrbot.api.message_components import *
-        logger.info(message_chain)
-        yield event.plain_result(f"Hello, {user_name}, 你发了 {message_str}!") # 发送一条纯文本消息
+        # 用列表下标定位，避免再拿标签回查 DataFrame（下标是 int，类型干净）
+        self._rows = df.iloc[1:].values.tolist()
+        self._names = [str(row[1]).strip() for row in self._rows]  # 菜品名在第 1 列
+        self._base_names = [base_name(name) for name in self._names]  # 剥掉标注后的主体名
+        logger.info(f"菜谱加载完成，共 {len(self._rows)} 条")
+
+    @filter.command("cuisine", alias={'菜谱'})
+    async def cuisine(self, event: AstrMessageEvent):
+        """查询菜谱：/cuisine 菜名"""
+        # 输入内容来自 message_str；剥掉指令前缀（含别名「菜谱」），兼容不剥的情况
+        target = CMD_PREFIX.sub("", event.message_str).strip()
+        text = await self._build_reply(target)
+
+        # 这里手动发送、不走 `yield event.plain_result(text)`：
+        # AstrBot 的「引用回复」（platform_settings.reply_with_quote）会往消息链头部插入 Reply 段，
+        # 该段序列化后带一个空的 chain 字段，部分 NapCat 版本会直接拒绝整条消息
+        # （ActionFailed retcode=1400, 'message segment "reply" field "chain" must be a scalar value'），
+        # 结果消息完全发不出去。自己发送就不含 Reply 段，保证送达（代价是没有引用效果）。
+        # 若日后 AstrBot / NapCat 修好，可换回 yield event.plain_result(text)。
+        try:
+            await event.send(MessageChain([Plain(text)]))
+        except Exception as e:
+            logger.error(f"发送菜谱结果失败：{e}")
+        # 已经自己发过了，终止事件传播，避免 AstrBot 再把结果拿去（带引用地）发送一遍
+        event.stop_event()
+        yield
+
+    async def _build_reply(self, target: str) -> str:
+        """把查询结果整理成要回复的纯文本。"""
+        if not self._rows:
+            return "菜谱数据没加载成功，请检查 cuisine.xlsx 是否放在插件目录下。"
+        if not target:
+            return "请输入菜名，例如：/cuisine 和煦花果茶"
+
+        # 用主体名算相似度：输入“梦幻番茄汤汁面”和表里的“梦幻番茄汤汁面(金)”就是完全一致(1.0)
+        target_base = base_name(target)
+        scored = [
+            (SequenceMatcher(None, target_base, base).ratio(), pos)
+            for pos, base in enumerate(self._base_names)
+        ]
+        # key 只按分数排，稳定性保证同分时仍是表里的先后顺序
+        matched = sorted(
+            (item for item in scored if item[0] >= CUTOFF),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        if not matched:
+            return await self._ask_ai(target)
+
+        best_score, best_pos = matched[0]
+        # 有特殊效果才打印；注意判断和打印要用同一个下标，否则会打印出空行
+        row = ["" if pd.isna(cell) else cell for cell in self._rows[best_pos]]
+
+        lines = []
+        if best_score < 1:
+            lines.append("猜你想搜：")
+        lines.append(f"[{row[0]}] {row[1]}")
+        lines.append(f"食材：{row[2]} {row[3]} {row[4]} {row[5]}")
+        lines.append(f"厨具：{row[6]}")
+        if row[10] != "":
+            lines.append(str(row[10]))
+        if best_score < 1:
+            lines.append("或是其他的菜？")
+            lines.append(" ".join(self._names[pos] for _, pos in matched[1:]))
+        return "\n".join(lines)
+
+    async def _ask_ai(self, target: str) -> str:
+        """表里查不到时交给大模型兜底。"""
+        # openai 的 import 要 1.2s 左右，只有真需要问 AI 时才导入；命中菜品时可以完全跳过
+        from openai import AsyncOpenAI
+
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            logger.error("缺少环境变量 DEEPSEEK_API_KEY，无法调用 AI 兜底")
+            return "没有这道菜哦，也不知道它要什么食材……（请管理员配置 DEEPSEEK_API_KEY）"
+
+        client = AsyncOpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+
+        try:
+            response = await client.chat.completions.create(
+                model="deepseek-flash",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是一个厨艺大师，擅长根据食材和厨具推荐菜谱。",
+                    },
+                    {
+                        "role": "user",
+                        "content": f"现在用户询问这道菜{target}，但现有的菜单里没有这个菜，请用以下说法来回答：没有这道菜哦，但基本上就是【食材】【食材】（或者更多，最多4个），然后使用【厨具】。语言请一定要简洁。",
+                    },
+                ],
+                stream=False,
+                # thinking 关闭 = 非思考模式；reasoning_effort="high" 会把思考模式重新打开，两者冲突，所以不传
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        except Exception as e:
+            logger.error(f"调用 DeepSeek 失败：{e}")
+            return "没有这道菜哦，查询服务暂时有点问题，稍后再试试。"
+
+        return response.choices[0].message.content or "没有这道菜哦。"
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
