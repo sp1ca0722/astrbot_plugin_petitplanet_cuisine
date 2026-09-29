@@ -105,7 +105,8 @@ class MyPlugin(Star):
         lines.append(f"厨具：{row[6]}")
         if row[10] != "":
             lines.append(str(row[10]))
-        if best_score < 1:
+        # 只有一项匹配时没有「其他的菜」可列，不输出这一行
+        if best_score < 1 and len(matched) > 1:
             lines.append("或是其他的菜？")
             lines.append(" ".join(self._names[pos] for _, pos in matched[1:]))
         return "\n".join(lines)

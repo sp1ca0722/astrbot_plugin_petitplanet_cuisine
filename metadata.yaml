@@ -1,6 +1,6 @@
 name: astrbot_plugin_petitplanet_cuisine
 display_name: 星布谷地菜谱查询
 desc: 星布谷地菜谱查询插件：发送 /cuisine 菜名 或 /菜谱 菜名，即可模糊匹配查询菜谱。 # 插件简短描述
-version: v1.0.0
+version: v1.0.1
 author: spica
 repo: https://github.com/sp1ca0722/astrbot_plugin_petitplanet_cuisine # 插件的仓库地址
