@@ -27,13 +27,14 @@ def base_name(text: str) -> str:
     return NAME_TAIL.sub("", s).strip() or s
 
 
-@register("astrbot_plugin_petitplanet_cuisine", "leoli", "星布谷地菜谱查询", "1.0.0")
+@register("astrbot_plugin_petitplanet_cuisine", "spica", "星布谷地菜谱查询", "1.0.2")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self._rows = []
         self._names = []
         self._base_names = []
+        self._source = ""  # 表头 L1、M1：数据来源与更新日期
 
     async def initialize(self):
         """插件实例化后自动调用：把菜谱表读进内存，之后每次查询不再碰磁盘。"""
@@ -47,6 +48,11 @@ class MyPlugin(Star):
         self._rows = df.iloc[1:].values.tolist()
         self._names = [str(row[1]).strip() for row in self._rows]  # 菜品名在第 1 列
         self._base_names = [base_name(name) for name in self._names]  # 剥掉标注后的主体名
+        # 表头首行的 L、M 两格是「数据来源」「更新日期」，供 /菜谱 源 查询
+        header = df.iloc[0].tolist()
+        self._source = "\n".join(
+            str(cell).strip() for cell in header[11:13] if not pd.isna(cell) and str(cell).strip()
+        )
         logger.info(f"菜谱加载完成，共 {len(self._rows)} 条")
 
     @filter.command("cuisine", alias={'菜谱'})
@@ -76,6 +82,9 @@ class MyPlugin(Star):
             return "菜谱数据没加载成功，请检查 cuisine.xlsx 是否放在插件目录下。"
         if not target:
             return "请输入菜名，例如：/cuisine 和煦花果茶"
+        # 「源」是固定关键词：直接回表头的 L1、M1（数据来源、更新日期），不走模糊匹配
+        if target == "源":
+            return self._source or "表格里没有填写数据来源与更新日期。"
 
         # 用主体名算相似度：输入“梦幻番茄汤汁面”和表里的“梦幻番茄汤汁面(金)”就是完全一致(1.0)
         target_base = base_name(target)
