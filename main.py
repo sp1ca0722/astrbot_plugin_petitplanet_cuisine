@@ -27,7 +27,7 @@ def base_name(text: str) -> str:
     return NAME_TAIL.sub("", s).strip() or s
 
 
-@register("astrbot_plugin_petitplanet_cuisine", "spica", "星布谷地菜谱查询", "1.0.2")
+@register("astrbot_plugin_petitplanet_cuisine", "spica", "星布谷地菜谱查询", "1.0.2.1")
 class MyPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -55,7 +55,7 @@ class MyPlugin(Star):
         )
         logger.info(f"菜谱加载完成，共 {len(self._rows)} 条")
 
-    @filter.command("cuisine", alias={'菜谱'})
+    @filter.command("recipe", alias={'菜谱', '食谱'})
     async def cuisine(self, event: AstrMessageEvent):
         """查询菜谱：/cuisine 菜名"""
         # 输入内容来自 message_str；剥掉指令前缀（含别名「菜谱」），兼容不剥的情况
