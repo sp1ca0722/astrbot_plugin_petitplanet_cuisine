@@ -76,35 +76,17 @@ class MyPlugin(Star):
         event.stop_event()
         yield
 
-    @filter.command("mdtest")
-    async def mdtest(self, event: AstrMessageEvent):
-        """测试 Markdown 渲染：/cuisine mdtest"""
-        text = (
-            "这是一个 Markdown 测试：\n"
-            "1. **加粗**\n"
-            "2. *斜体*\n"
-            "3. `代码`\n"
-            "4. [链接](https://webspica.top)\n"
-            "5. 列表：\n"
-            "   - 项目 1\n"
-            "   - 项目 2\n"
-            "6. 引用：\n"
-            "> 这是一个引用文本。\n"
-        )
-        yield event.plain_result(text)
-
     @filter.command("help", alias={'帮助'})
     async def help(self, event: AstrMessageEvent):
         """查询菜谱帮助：/cuisine help"""
         text = (
-            "使用帮助\n"
-            "---------------------------------\n"
-            "/食谱 菜名(可模糊搜索)\n"
-            "    返回这道菜的食材和做法\n"
-            "/菜详情 菜名(可模糊搜索)\n"
-            "    返回这道菜具体信息\n"
-            "/许愿 许愿内容\n"
-            "    可以进行对bot功能的许愿（）"
+            "### 使用帮助\n\n"
+            "`/食谱 菜名`(可模糊搜索)\n"
+            "- 返回这道菜的食材和做法\n\n"
+#            "`/菜详情 菜名`(可模糊搜索)\n"
+#            "- 返回这道菜具体信息\n"
+            "`/许愿 许愿内容`\n"
+            "- 可以进行对bot功能的许愿（）"
         )
         yield event.plain_result(text)
 
@@ -141,15 +123,19 @@ class MyPlugin(Star):
         lines = []
         if best_score < 1:
             lines.append("猜你想搜：")
-        lines.append(f"[{row[0]}] {row[1]}")
-        lines.append(f"食材：{row[2]} {row[3]} {row[4]} {row[5]}")
+        lines.append(f"**[{row[0]}] {row[1]}**")
+        # 空的食材格子直接跳过，有内容的各自包成行内代码
+        ingredients = [str(cell).strip() for cell in row[2:6]]
+        ingredients = [f"`{name}`" for name in ingredients if name]
+        if ingredients:
+            lines.append("食材：" + " ".join(ingredients))
         lines.append(f"厨具：{row[6]}")
         if row[10] != "":
             lines.append(str(row[10]))
         # 只有一项匹配时没有「其他的菜」可列，不输出这一行
         if best_score < 1 and len(matched) > 1:
-            lines.append("或是其他的菜？")
-            lines.append(" ".join(self._names[pos] for _, pos in matched[1:]))
+            lines.append("> **或是其他的菜？**")
+            lines.append("> " + " ".join(self._names[pos] for _, pos in matched[1:]))
         return "\n".join(lines)
 
     async def _ask_ai(self, target: str) -> str:
