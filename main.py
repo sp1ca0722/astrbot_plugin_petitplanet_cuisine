@@ -9,16 +9,36 @@ import pandas as pd
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Plain
 from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+from astrbot.api import AstrBotConfig, logger
 
 CUTOFF = 0.3
 # 删掉品质
 NAME_TAIL = re.compile(r"\s*\([^()]*\)\s*$")
-# 从消息里剥掉 "/cuisine"、"/菜谱" 这类指令前缀，兼容带不带斜杠、带不带空格
+# 从消息里剥掉 "/recipe"、"/菜谱" 这类指令前缀，兼容带不带斜杠、带不带空格
+# 指令名要与 @filter.command("recipe", alias={'菜谱', '食谱'}) 保持一致（cuisine 是旧命令名，留着兼容）
 # 用后瞻 (?![A-Za-z0-9_]) 代替 \b：\b 对中文不生效（中文算 word 字符），会导致 “/菜谱和煦花果茶” 剥不掉
-CMD_PREFIX = re.compile(r"^\s*/?\s*(?:cuisine|菜谱)(?![A-Za-z0-9_])[\s:：]*", re.IGNORECASE)
+CMD_PREFIX = re.compile(
+    r"^\s*/?\s*(?:recipe|cuisine|食谱|菜谱)(?![A-Za-z0-9_])[\s:：]*", re.IGNORECASE
+)
 # 数据表跟 main.py 放一起，避免受 AstrBot 启动目录影响
 EXCEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuisine.xlsx")
+
+# 平台模式（_conf_schema.json 里的 platform_mode）：只有 QQ 官方机器人渲染 Markdown
+MODE_QQ_OFFICIAL = "qq_official"
+MODE_ONEBOT = "onebot"
+DEFAULT_PLATFORM_MODE = MODE_ONEBOT
+
+# 降级纯文本时要去掉的 Markdown 标记，都是「保留内容、只剥标记」
+MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)\s]*\)")
+MD_LINK = re.compile(r"\[([^\]]*)\]\([^)\s]*\)")
+MD_FENCE = re.compile(r"^[ \t]*```.*$\n?", re.MULTILINE)
+MD_HR = re.compile(r"^[ \t]{0,3}(?:[-*_][ \t]*){3,}$\n?", re.MULTILINE)
+MD_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]*", re.MULTILINE)
+MD_QUOTE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.MULTILINE)
+MD_LIST = re.compile(r"^([ \t]*)[-*+][ \t]+", re.MULTILINE)
+MD_CODE = re.compile(r"`([^`\n]+)`")
+MD_BOLD = re.compile(r"\*\*(.+?)\*\*")
+MD_ITALIC = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
 
 
 def base_name(text: str) -> str:
@@ -27,10 +47,34 @@ def base_name(text: str) -> str:
     return NAME_TAIL.sub("", s).strip() or s
 
 
-@register("astrbot_plugin_petitplanet_cuisine", "spica", "星布谷地菜谱查询", "1.0.2.1")
+def strip_markdown(text: str) -> str:
+    """把 Markdown 标记去掉、只留内容，给不渲染 Markdown 的平台用。
+
+    顺序有讲究：图片要先于链接（否则 `![x](y)` 会剩下一个 `!`），
+    行内代码要先于加粗/斜体（避免代码里的 `*` 被当成强调标记）。
+    """
+    for pattern, repl in (
+        (MD_IMAGE, r"\1"),
+        (MD_LINK, r"\1"),
+        (MD_FENCE, ""),
+        (MD_HR, ""),
+        (MD_HEADING, ""),
+        (MD_QUOTE, ""),
+        (MD_LIST, r"\1"),  # 去掉列表的 "- " 标记，保留缩进
+        (MD_CODE, r"\1"),
+        (MD_BOLD, r"\1"),
+        (MD_ITALIC, r"\1"),
+    ):
+        text = pattern.sub(repl, text)
+    return text
+
+
+@register("astrbot_plugin_petitplanet_cuisine", "spica", "星布谷地菜谱查询", "1.0.3")
 class MyPlugin(Star):
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
         super().__init__(context)
+        # 老版本 AstrBot 不传 config，此时按默认模式（默认 onebot = 去 Markdown）处理
+        self.config = config or {}
         self._rows = []
         self._names = []
         self._base_names = []
@@ -53,14 +97,14 @@ class MyPlugin(Star):
         self._source = "\n".join(
             str(cell).strip() for cell in header[11:13] if not pd.isna(cell) and str(cell).strip()
         )
-        logger.info(f"菜谱加载完成，共 {len(self._rows)} 条")
+        logger.info(f"菜谱加载完成，共 {len(self._rows)} 条；平台模式：{self._platform_mode()}")
 
     @filter.command("recipe", alias={'菜谱', '食谱'})
     async def cuisine(self, event: AstrMessageEvent):
-        """查询菜谱：/cuisine 菜名"""
+        """查询菜谱：/recipe 菜名"""
         # 输入内容来自 message_str；剥掉指令前缀（含别名「菜谱」），兼容不剥的情况
         target = CMD_PREFIX.sub("", event.message_str).strip()
-        text = await self._build_reply(target)
+        text = self._render(await self._build_reply(target))
 
         # 这里手动发送、不走 `yield event.plain_result(text)`：
         # AstrBot 的「引用回复」（platform_settings.reply_with_quote）会往消息链头部插入 Reply 段，
@@ -76,9 +120,9 @@ class MyPlugin(Star):
         event.stop_event()
         yield
 
-    @filter.command("help", alias={'帮助'})
+    @filter.command("helpme", alias={'帮助'})
     async def help(self, event: AstrMessageEvent):
-        """查询菜谱帮助：/cuisine help"""
+        """查询菜谱帮助：/helpme"""
         text = (
             "### 使用帮助\n\n"
             "`/食谱 菜名`(可模糊搜索)\n"
@@ -88,7 +132,16 @@ class MyPlugin(Star):
             "`/许愿 许愿内容`\n"
             "- 可以进行对bot功能的许愿（）"
         )
-        yield event.plain_result(text)
+        yield event.plain_result(self._render(text))
+
+    def _platform_mode(self) -> str:
+        """读配置里的平台模式，兼容大小写和空格；取值不认识时回落到默认值。"""
+        mode = str(self.config.get("platform_mode") or DEFAULT_PLATFORM_MODE).strip().lower()
+        return mode if mode in (MODE_QQ_OFFICIAL, MODE_ONEBOT) else DEFAULT_PLATFORM_MODE
+
+    def _render(self, text: str) -> str:
+        """按平台模式整理输出：OneBot 不会渲染 Markdown，得先把标记去掉。"""
+        return strip_markdown(text) if self._platform_mode() == MODE_ONEBOT else text
 
     async def _build_reply(self, target: str) -> str:
         """把查询结果整理成要回复的纯文本。"""
