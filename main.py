@@ -76,12 +76,44 @@ class MyPlugin(Star):
         event.stop_event()
         yield
 
+    @filter.command("mdtest")
+    async def mdtest(self, event: AstrMessageEvent):
+        """测试 Markdown 渲染：/cuisine mdtest"""
+        text = (
+            "这是一个 Markdown 测试：\n"
+            "1. **加粗**\n"
+            "2. *斜体*\n"
+            "3. `代码`\n"
+            "4. [链接](https://webspica.top)\n"
+            "5. 列表：\n"
+            "   - 项目 1\n"
+            "   - 项目 2\n"
+            "6. 引用：\n"
+            "> 这是一个引用文本。\n"
+        )
+        yield event.plain_result(text)
+
+    @filter.command("help", alias={'帮助'})
+    async def help(self, event: AstrMessageEvent):
+        """查询菜谱帮助：/cuisine help"""
+        text = (
+            "使用帮助\n"
+            "---------------------------------\n"
+            "/食谱 菜名(可模糊搜索)\n"
+            "    返回这道菜的食材和做法\n"
+            "/菜详情 菜名(可模糊搜索)\n"
+            "    返回这道菜具体信息\n"
+            "/许愿 许愿内容\n"
+            "    可以进行对bot功能的许愿（）"
+        )
+        yield event.plain_result(text)
+
     async def _build_reply(self, target: str) -> str:
         """把查询结果整理成要回复的纯文本。"""
         if not self._rows:
             return "菜谱数据没加载成功，请检查 cuisine.xlsx 是否放在插件目录下。"
         if not target:
-            return "请输入菜名，例如：/cuisine 和煦花果茶"
+            return "请输入菜名，例如：/食谱 和煦花果茶"
         # 「源」是固定关键词：直接回表头的 L1、M1（数据来源、更新日期），不走模糊匹配
         if target == "源":
             return self._source or "表格里没有填写数据来源与更新日期。"
